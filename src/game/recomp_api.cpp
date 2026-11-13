@@ -1,4 +1,15 @@
+#ifdef _WIN32
+// Winsock must precede headers that may include windows.h.
+#include <winsock2.h>
+#endif
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <vector>
 
 #include "recomp.h"
 #include "librecomp/overlays.hpp"
@@ -17,7 +28,259 @@
 #include "ultramodern/ultramodern.hpp"
 #include "ultramodern/config.hpp"
 #include "../lib/N64ModernRuntime/thirdparty/xxHash/xxh3.h"
+#include "yg_coop_capture.h"
+#include "yg_coop_net.hpp"
+#include "yg_coop_smooth.hpp"
+#define YGNET_IMPLEMENTATION
+#include "yougame_net.h"
+#include "yg_coop_relay.hpp"
+#include <memory>
 
+namespace {
+// Isolate all ordinary stdout writers before main starts. This includes the
+// character-at-a-time recomp_puts implementation below and third-party prints.
+const int yg_relay_protocol_fd = yg_coop::isolate_relay_stdout();
+}
+
+namespace {
+struct YGFrameRequest {
+    uint32_t task_dl = 0;
+    uint32_t framebuffer = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t seconds = 0;
+};
+std::mutex yg_frame_mutex;
+YGFrameRequest yg_frame_request;
+}
+
+namespace {
+class YGNativeTransport {
+public:
+    YGNativeTransport() : udp_(yg_coop::config(
+        std::getenv("YG_COOP_NET"), std::getenv("YG_COOP_ROLE"),
+        std::getenv("YG_COOP_PORT"), std::getenv("YG_COOP_PEER_PORT"))),
+        smoother_(1) {
+        if (yg_coop::relay_enabled()) relay_ = std::make_unique<yg_coop::RelayTransport>(yg_relay_protocol_fd);
+        // The low-level test transport keeps its historical default echo mode.
+        // A normal game without an explicit co-op setting stays single-player.
+        standalone_off_ = !relay_ && !std::getenv("YG_COOP_NET");
+    }
+    int mode() const { return relay_ ? relay_->mode() : standalone_off_ ? YG_NET_ERROR : udp_.mode(); }
+    char role() const { return mode() == YG_NET_ROLE_A ? 'a' : 'b'; }
+    uint32_t step(const yg_coop::Sample &sample, uint32_t frame) {
+        if (standalone_off_) return 0;
+        auto accept = [&](const yg_coop::Sample &remote, uint32_t sender_frame) {
+            smoother_.accept(remote, sender_frame, frame);
+        };
+        const uint32_t status = relay_ ? relay_->step(sample, frame, accept) : udp_.step(sample, frame, accept);
+        if (mode() == YG_NET_ROLE_A || mode() == YG_NET_ROLE_B) {
+            if (status & YG_NET_HAS_SAMPLE) {
+                if (yg_coop::get32(sample.data() + YG_S_MAP) != 0xFFFFFFFFu &&
+                    (!have_local_ || yg_coop::get32(sample.data()) != yg_coop::get32(last_local_.data()) ||
+                     sample[YG_S_SPAWN] != last_local_[YG_S_SPAWN] || sample[YG_S_KONG] != last_local_[YG_S_KONG]))
+                    smoother_.snap_to_newest(yg_coop::SmoothSnap::local_spawn, frame);
+                if ((status & YG_NET_LIVE) && !was_live_)
+                    smoother_.snap_to_newest(yg_coop::SmoothSnap::peer_resume, frame);
+            }
+            const bool visible = (status & YG_NET_LIVE) &&
+                yg_coop::get32(sample.data()) != 0xFFFFFFFFu &&
+                yg_coop::get32(sample.data()) == yg_coop::get32(smoother_.newest().data());
+            smoother_.render(frame, visible);
+            last_local_ = sample; have_local_ = true; was_live_ = (status & YG_NET_LIVE) != 0;
+        }
+        return status;
+    }
+    const yg_coop::Sample &remote() const { return smoother_.sample(); }
+private:
+    yg_coop::Transport udp_;
+    std::unique_ptr<yg_coop::RelayTransport> relay_;
+    yg_coop::Smoother smoother_;
+    yg_coop::Sample last_local_{};
+    bool have_local_ = false, was_live_ = false, standalone_off_ = false;
+};
+YGNativeTransport &yg_transport() {
+    // Function-local initialization preserves the milestone-2 echo/UDP config.
+    // Relay mode creates the stdio worker; UDP keeps literal loopback endpoints.
+    static YGNativeTransport transport;
+    return transport;
+}
+}
+
+// 4A test-kong import
+extern "C" void yg_coop_test_kong(uint8_t *rdram, recomp_context *ctx) {
+    // 0=off; low byte=Kong+1; bit 8 marks the file source. Valid env wins.
+    const auto parse = [](const char *value) -> uint32_t {
+        if (!value) return 0;
+        while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') ++value;
+        if (*value < '0' || *value > '4') return 0;
+        const uint32_t kong = static_cast<uint32_t>(*value++ - '0') + 1;
+        while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') ++value;
+        return *value == '\0' ? kong : 0;
+    };
+    uint32_t selection = parse(std::getenv("YG_COOP_TEST_KONG"));
+    if (!selection) {
+        const char *folder = std::getenv("APP_FOLDER_PATH");
+        if (folder && *folder) {
+            try {
+                std::ifstream input(std::filesystem::path(folder) / "yg-coop-test-kong.txt");
+                char line[32]{};
+                if (input.getline(line, sizeof(line))) {
+                    selection = parse(line);
+                    if (selection) selection |= 0x100;
+                }
+            } catch (const std::exception &) {
+                std::fprintf(stderr, "YG-COOP error test-kong file-read\n");
+            }
+        }
+    }
+    _return(ctx, selection);
+}
+
+extern "C" void yg_coop_net_mode(uint8_t *rdram, recomp_context *ctx) {
+    _return(ctx, static_cast<uint32_t>(yg_transport().mode()));
+}
+
+extern "C" void yg_coop_net_step(uint8_t *rdram, recomp_context *ctx) {
+    const uint32_t local = _arg<0, uint32_t>(rdram, ctx);
+    const uint32_t remote = _arg<1, uint32_t>(rdram, ctx);
+    const uint32_t frame = _arg<2, uint32_t>(rdram, ctx);
+    const uint32_t size = _arg<3, uint32_t>(rdram, ctx);
+    if (size != YG_SAMPLE_SIZE ||
+        !yg_coop::valid_ram_address(local, recomp::mem_size) ||
+        !yg_coop::valid_ram_address(remote, recomp::mem_size)) {
+        static bool logged = false;
+        if (!logged) std::fprintf(stderr, "YG-COOP error net-ram sample-size/address\n");
+        logged = true;
+        _return(ctx, uint32_t(0));
+        return;
+    }
+    // Raw host pointers would reverse bytes within each N64 word. These
+    // accessors produce canonical N64 big-endian bytes, including float bits.
+    const gpr local_address = static_cast<gpr>(static_cast<int32_t>(local));
+    const gpr remote_address = static_cast<gpr>(static_cast<int32_t>(remote));
+    const auto sample = yg_coop::read_sample([&](size_t i) { return MEM_BU(i, local_address); });
+    auto &transport = yg_transport();
+    const uint32_t status = transport.step(sample, frame);
+    if (status & YG_NET_HAS_SAMPLE) {
+        yg_coop::write_sample(transport.remote(), [&](size_t i, uint8_t value) {
+            MEM_B(i, remote_address) = static_cast<int8_t>(value);
+        });
+    }
+    _return(ctx, status);
+}
+
+extern "C" void yg_coop_camera_input(uint8_t *rdram, recomp_context *ctx) {
+    // These getters inspect the app's current game input snapshot without
+    // consuming it. This covers camera input that is absent from OSContPad.
+    float x = 0.0f, y = 0.0f;
+    recompinput::get_right_analog(0, &x, &y);
+    // Ignore residual drift even when the configured joystick deadzone is 0.
+    bool active = std::fabs(x) > 0.10f || std::fabs(y) > 0.10f;
+    recompinput::get_mouse_deltas(&x, &y);
+    // Mouse motion is intentional input; it has no stationary sensor noise.
+    active |= x != 0.0f || y != 0.0f;
+    recompinput::get_gyro_deltas(0, &x, &y);
+    // Frontend returns accumulated player-space angular rate (degrees/sec),
+    // scaled by gyro sensitivity; a resting DualSense is rarely exactly zero.
+    active |= std::fabs(x) > 2.0f || std::fabs(y) > 2.0f;
+    _return(ctx, static_cast<uint32_t>(active));
+}
+
+extern "C" void yg_coop_request_frame(uint8_t *rdram, recomp_context *ctx) {
+    YGFrameRequest request;
+    request.task_dl = _arg<0, uint32_t>(rdram, ctx) & 0x1FFFFFFF;
+    request.framebuffer = _arg<1, uint32_t>(rdram, ctx) & 0x1FFFFFFF;
+    const uint32_t dimensions = _arg<2, uint32_t>(rdram, ctx);
+    request.width = dimensions >> 16;
+    request.height = dimensions & 0xFFFF;
+    request.seconds = _arg<3, uint32_t>(rdram, ctx);
+    if (request.width == 0 || request.width > 640 || request.height == 0 || request.height > 480 ||
+        request.framebuffer >= 0x800000 ||
+        request.width * request.height * 2 > 0x800000 - request.framebuffer ||
+        (request.framebuffer & 1) ||
+        (request.seconds != 5 && request.seconds != 15 && request.seconds != 25 && request.seconds != 33)) {
+        fprintf(stderr, "YG-COOP error frame-dump-invalid-request\n");
+        return;
+    }
+    std::lock_guard lock(yg_frame_mutex);
+    if (yg_frame_request.seconds != 0) {
+        fprintf(stderr, "YG-COOP error frame-dump-request-pending\n");
+        return;
+    }
+    yg_frame_request = request;
+}
+
+void yg_coop_capture_after_dl(uint8_t *rdram, uint32_t task_dl) {
+    YGFrameRequest request;
+    {
+        std::lock_guard lock(yg_frame_mutex);
+        if (yg_frame_request.seconds == 0 ||
+            yg_frame_request.task_dl != (task_dl & 0x1FFFFFFF)) return;
+        request = yg_frame_request;
+        yg_frame_request = {};
+    }
+    // This reads only this game's rendered RGB5551 framebuffer. No window,
+    // desktop, personal app, OS capture API, permission, or new library.
+#ifdef _WIN32
+    const wchar_t *app_folder = _wgetenv(L"APP_FOLDER_PATH");
+#else
+    const char *app_folder = std::getenv("APP_FOLDER_PATH");
+#endif
+    if (app_folder == nullptr || app_folder[0] == '\0') {
+        fprintf(stderr, "YG-COOP error frame-dump APP_FOLDER_PATH is unset\n");
+        return;
+    }
+    try {
+        const auto &transport = yg_transport();
+        const std::string prefix = transport.mode() == YG_NET_ECHO ? "yg-coop-walk" :
+            std::string("yg-coop-") + transport.role() + "-walk";
+        const auto path = std::filesystem::path(app_folder) /
+            (prefix + std::to_string(request.seconds) + "s.ppm");
+        std::vector<uint8_t> pixels(request.width * request.height * 3);
+        for (uint32_t i = 0; i < request.width * request.height; ++i) {
+            // RT64 stores N64 halfwords in the runtime's word-swapped RAM.
+            const gpr framebuffer = static_cast<gpr>(static_cast<int32_t>(request.framebuffer | 0x80000000u));
+            const uint16_t pixel = MEM_HU(i * 2, framebuffer);
+            const uint8_t red = (pixel >> 11) & 31;
+            const uint8_t green = (pixel >> 6) & 31;
+            const uint8_t blue = (pixel >> 1) & 31;
+            pixels[i * 3] = (red << 3) | (red >> 2);
+            pixels[i * 3 + 1] = (green << 3) | (green >> 2);
+            pixels[i * 3 + 2] = (blue << 3) | (blue >> 2);
+        }
+#ifdef _WIN32
+        // Only diagnostics need UTF-8; filesystem I/O keeps the wide native path.
+        const auto utf8_path = path.u8string();
+        const std::string log_path(reinterpret_cast<const char *>(utf8_path.data()), utf8_path.size());
+#endif
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file << "P6\n" << request.width << ' ' << request.height << "\n255\n";
+        file.write(reinterpret_cast<const char *>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+        file.close();
+        if (!file) {
+#ifdef _WIN32
+            fprintf(stderr, "YG-COOP error frame-dump-write path=%s\n", log_path.c_str());
+#else
+            fprintf(stderr, "YG-COOP error frame-dump-write path=%s\n", path.string().c_str());
+#endif
+            return;
+        }
+#ifdef _WIN32
+        printf("YG-COOP frame-dump seconds=%u path=%s\n", request.seconds, log_path.c_str());
+#else
+        printf("YG-COOP frame-dump seconds=%u path=%s\n", request.seconds, path.string().c_str());
+#endif
+        fflush(stdout);
+    } catch (const std::exception &error) {
+        fprintf(stderr, "YG-COOP error frame-dump %s\n", error.what());
+    }
+}
+
+#ifndef _WIN32
+// Preserve Mac quick_exit source-line diagnostics after the guarded additions.
+#line 258
+#endif
 extern "C" void recomp_update_inputs(uint8_t* rdram, recomp_context* ctx) {
     recompinput::poll_inputs();
 }

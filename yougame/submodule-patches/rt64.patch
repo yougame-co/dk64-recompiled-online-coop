@@ -1,0 +1,73 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,7 +5,9 @@
+ 
+ if (APPLE)
+     enable_language(OBJC OBJCXX)
+-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15")
++    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
++        set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15")
++    endif()
+ endif()
+ 
+ option(RT64_STATIC "Build RT64 as a static library" OFF)
+@@ -135,6 +137,9 @@
+     target_sources(${TARGETOBJ} PRIVATE ${OUTNAME}.dxil.c)
+ endfunction()
+ 
++set(RT64_METAL_COMMAND xcrun -sdk macosx metal CACHE STRING "Metal compiler command")
++set(RT64_METALLIB_COMMAND xcrun -sdk macosx metallib CACHE STRING "Metal library linker command")
++
+ function(build_shader_msl_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
+     add_custom_command(OUTPUT ${OUTNAME}.spv
+             COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
+@@ -143,10 +148,10 @@
+             COMMAND spirv_cross_msl ${OUTNAME}.spv ${OUTNAME}.metal
+             DEPENDS ${OUTNAME}.spv spirv_cross_msl)
+     add_custom_command(OUTPUT ${OUTNAME}.ir
+-            COMMAND xcrun -sdk macosx metal -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
++            COMMAND ${RT64_METAL_COMMAND} -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
+             DEPENDS ${OUTNAME}.metal)
+     add_custom_command(OUTPUT ${OUTNAME}.metallib
+-            COMMAND xcrun -sdk macosx metallib ${OUTNAME}.ir -o ${OUTNAME}.metallib
++            COMMAND ${RT64_METALLIB_COMMAND} ${OUTNAME}.ir -o ${OUTNAME}.metallib
+             DEPENDS ${OUTNAME}.ir)
+     add_custom_command(OUTPUT ${OUTNAME}.metal.c
+             COMMAND file_to_c ${OUTNAME}.metallib ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
+--- a/src/imgui/imgui_impl_sdl2_custom.cpp
++++ b/src/imgui/imgui_impl_sdl2_custom.cpp
+@@ -135,16 +135,12 @@
+ // Functions
+ static const char* ImGui_ImplSDL2_GetClipboardText(void*)
+ {
+-    ImGui_ImplSDL2_Data* bd = ImGui_ImplSDL2_GetBackendData();
+-    if (bd->ClipboardTextData)
+-        SDL_free(bd->ClipboardTextData);
+-    bd->ClipboardTextData = SDL_GetClipboardText();
+-    return bd->ClipboardTextData;
++    return ""; // Clipboard disabled for the restricted build.
+ }
+ 
+ static void ImGui_ImplSDL2_SetClipboardText(void*, const char* text)
+ {
+-    SDL_SetClipboardText(text);
++    (void)text; // Clipboard disabled for the restricted build.
+ }
+ 
+ // Note: native IME will only display if user calls SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1") _before_ SDL_CreateWindow().
+@@ -544,14 +540,7 @@
+         if (io.WantSetMousePos)
+             SDL_WarpMouseInWindow(bd->Window, (int)io.MousePos.x, (int)io.MousePos.y);
+ 
+-        // (Optional) Fallback to provide mouse position when focused (SDL_MOUSEMOTION already provides this when hovered or captured)
+-        if (bd->MouseCanUseGlobalState && bd->MouseButtonsDown == 0)
+-        {
+-            int window_x, window_y, mouse_x_global, mouse_y_global;
+-            SDL_GetGlobalMouseState(&mouse_x_global, &mouse_y_global);
+-            SDL_GetWindowPosition(bd->Window, &window_x, &window_y);
+-            io.AddMousePosEvent((float)(mouse_x_global - window_x), (float)(mouse_y_global - window_y));
+-        }
++        // Global mouse-position fallback disabled for the restricted build.
+     }
+ }
+ 

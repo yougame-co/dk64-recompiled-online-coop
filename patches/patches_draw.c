@@ -1,5 +1,6 @@
 #include "common_structs.h"
 #include "ui.h"
+#include "yg_coop.h"
 
 RECOMP_DECLARE_EVENT(recomp_on_asset_file_load_override(s32 tableIndex, s32 fileIndex, u8** outputFile, s32 *file_size));
 
@@ -331,7 +332,7 @@ block_47:
     gDPPipeSync(dl++);
     gDPSetTextureLUT(dl++, G_TT_NONE);
     gDPPipeSync(dl++);
-    return dl;
+    return yg_coop_draw_echo(arg0, arg1, dl, arg3);
 }
 
 typedef struct chunk_14 Chunk14;

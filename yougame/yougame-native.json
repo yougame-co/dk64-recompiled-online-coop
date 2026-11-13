@@ -1,0 +1,1 @@
+{"version":1,"args":["--game","dk64","--rom","{disc}"],"disc":true,"net":"yougame","memoryMb":8192,"embed":{"class":"SDL_app","title":"DK64 Recompiled Co-op"}}

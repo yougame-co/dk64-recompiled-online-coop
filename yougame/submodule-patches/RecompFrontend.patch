@@ -1,0 +1,177 @@
+--- a/recompui/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
++++ b/recompui/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
+@@ -94,14 +94,12 @@
+ 
+ void SystemInterface_SDL::SetClipboardText(const Rml::String& text_utf8)
+ {
+-	SDL_SetClipboardText(text_utf8.c_str());
++	(void)text_utf8; // Clipboard disabled for the restricted build.
+ }
+ 
+ void SystemInterface_SDL::GetClipboardText(Rml::String& text)
+ {
+-	char* raw_text = SDL_GetClipboardText();
+-	text = Rml::String(raw_text);
+-	SDL_free(raw_text);
++	text.clear();
+ }
+ 
+ bool RmlSDL::InputEventHandler(Rml::Context* context, SDL_Event& ev)
+--- a/recompui/src/composites/ui_mod_discovery_http.cpp
++++ b/recompui/src/composites/ui_mod_discovery_http.cpp
+@@ -94,116 +94,21 @@
+ 
+     std::string http_fetch_string(const std::string &url)
+     {
+-        CurlSession session;
+-        std::string response;
++        throw std::runtime_error("YouGame restricted build: mod HTTP disabled");
++    
++}
+ 
+-        std::string busted_url = append_cache_busting_query(url);
+-
+-        curl_easy_setopt(session.handle, CURLOPT_URL, busted_url.c_str());
+-        curl_easy_setopt(session.handle, CURLOPT_WRITEFUNCTION,
+-                         write_string_callback);
+-        curl_easy_setopt(session.handle, CURLOPT_WRITEDATA, &response);
+-        curl_easy_setopt(session.handle, CURLOPT_TIMEOUT, 30L);
+-
+-        struct curl_slist *headers = make_no_cache_headers();
+-        curl_easy_setopt(session.handle, CURLOPT_HTTPHEADER, headers);
+-
+-        CURLcode res = session.perform();
+-        curl_slist_free_all(headers);
+-
+-        if (res != CURLE_OK)
+-            throw std::runtime_error(std::string("libcurl error: ") +
+-                                     curl_easy_strerror(res));
+-
+-        long http_code = session.response_code();
+-        if (http_code != 200)
+-            throw std::runtime_error("HTTP error: " + std::to_string(http_code));
+-
+-        if (response.empty())
+-            throw std::runtime_error("No data received from server");
+-
+-        return response;
+-    }
+-
+     std::vector<char> http_fetch_bytes(const std::string &url)
+     {
+-        CurlSession session;
+-        std::vector<char> response;
++        throw std::runtime_error("YouGame restricted build: mod HTTP disabled");
++    
++}
+ 
+-        std::string busted_url = append_cache_busting_query(url);
+-
+-        curl_easy_setopt(session.handle, CURLOPT_URL, busted_url.c_str());
+-        curl_easy_setopt(session.handle, CURLOPT_WRITEFUNCTION,
+-                         write_bytes_callback);
+-        curl_easy_setopt(session.handle, CURLOPT_WRITEDATA, &response);
+-        curl_easy_setopt(session.handle, CURLOPT_TIMEOUT, 30L);
+-
+-        struct curl_slist *headers = make_no_cache_headers();
+-        curl_easy_setopt(session.handle, CURLOPT_HTTPHEADER, headers);
+-
+-        CURLcode res = session.perform();
+-        curl_slist_free_all(headers);
+-
+-        if (res != CURLE_OK)
+-            throw std::runtime_error(std::string("libcurl error: ") +
+-                                     curl_easy_strerror(res));
+-
+-        long http_code = session.response_code();
+-        if (http_code != 200)
+-            throw std::runtime_error("HTTP error: " + std::to_string(http_code));
+-
+-        if (response.empty())
+-            throw std::runtime_error("No data received from server");
+-
+-        return response;
+-    }
+-
+     void http_download_to_file(const std::string &url,
+                                const std::string &output_path)
+     {
+-        FILE *file = fopen(output_path.c_str(), "wb");
+-        if (!file)
+-        {
+-            throw std::runtime_error("Failed to open output file: " + output_path);
+-        }
++        throw std::runtime_error("YouGame restricted build: mod HTTP disabled");
++    
++}
+ 
+-        try
+-        {
+-            CurlSession session;
+-
+-            curl_easy_setopt(session.handle, CURLOPT_URL, url.c_str());
+-            curl_easy_setopt(session.handle, CURLOPT_WRITEFUNCTION,
+-                             write_file_callback);
+-            curl_easy_setopt(session.handle, CURLOPT_WRITEDATA, file);
+-            curl_easy_setopt(session.handle, CURLOPT_TIMEOUT, 120L);
+-
+-            CURLcode res = session.perform();
+-
+-            if (res != CURLE_OK)
+-            {
+-                fclose(file);
+-                std::filesystem::remove(output_path);
+-                throw std::runtime_error(std::string("libcurl download error: ") +
+-                                         curl_easy_strerror(res));
+-            }
+-
+-            long http_code = session.response_code();
+-            if (http_code != 200)
+-            {
+-                fclose(file);
+-                std::filesystem::remove(output_path);
+-                throw std::runtime_error("HTTP download error: " +
+-                                         std::to_string(http_code));
+-            }
+-        }
+-        catch (...)
+-        {
+-            fclose(file);
+-            std::filesystem::remove(output_path);
+-            throw;
+-        }
+-
+-        fclose(file);
+-    }
+-
+ }
+--- a/recompui/src/config/ui_config_tab_general.cpp
++++ b/recompui/src/config/ui_config_tab_general.cpp
+@@ -136,7 +136,7 @@
+             "<br/>"
+             "<b>This setting does not affect keyboard input.</b>",
+             background_input_options,
+-            BackgroundInputMode::On
++            BackgroundInputMode::Off
+         );
+ 
+         return config;
+--- a/recompui/src/renderer/rt64_render_context.cpp
++++ b/recompui/src/renderer/rt64_render_context.cpp
+@@ -10,6 +10,7 @@
+ #include "ultramodern/ultramodern.hpp"
+ #include "ultramodern/config.hpp"
+ 
++#include "librecomp/game.hpp"
+ #include "renderer.h"
+ #include "recompui/recompui.h"
+ #include "recompui/config.h"
+@@ -269,6 +270,8 @@
+     // Set up the RT64 application configuration fields.
+     RT64::ApplicationConfiguration appConfig;
+     appConfig.useConfigurationFile = false;
++    appConfig.detectDataPath = false;
++    appConfig.dataPath = recomp::get_config_path() / "rt64";
+ 
+     // Create the RT64 application.
+     app = std::make_unique<RT64::Application>(appCore, appConfig);

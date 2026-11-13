@@ -1,4 +1,8 @@
 TARGET = patches.elf
+.DEFAULT_GOAL := all
+# Local patch-only build: PatchesBin previously stopped at the MIPS ELF.
+# Keep the generated sources in sync without building or launching the app.
+FILE_TO_C ?= ../../build-arm64/file_to_c
 
 CC      ?= clang
 LD      ?= ld.lld
@@ -13,6 +17,10 @@ C_SRCS := $(wildcard *.c)
 C_OBJS := $(C_SRCS:.c=.o)
 C_DEPS := $(C_SRCS:.c=.d)
 
+all: $(TARGET)
+	cd .. && ./N64Recomp patches.toml
+	$(FILE_TO_C) patches.bin bk_patches_bin ../RecompiledPatches/patches_bin.c ../RecompiledPatches/patches_bin.h
+
 $(TARGET): $(C_OBJS) patches.ld syms.ld
 	$(LD) $(C_OBJS) $(LDFLAGS) -o $@
 
@@ -24,4 +32,4 @@ clean:
 
 -include $(C_DEPS)
 
-.PHONY: clean
+.PHONY: all clean

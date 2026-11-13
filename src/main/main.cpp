@@ -49,6 +49,8 @@
 #include "librecomp/game.hpp"
 #include "librecomp/mods.hpp"
 #include "librecomp/helpers.hpp"
+#include "yg_coop_capture.h"
+#include "yougame_data.hpp"
 
 #include "../../patches/graphics.h"
 #include "../../patches/input.h"
@@ -61,8 +63,8 @@ namespace {
 
 class PacingRendererContext final : public ultramodern::renderer::RendererContext {
 public:
-    explicit PacingRendererContext(std::unique_ptr<ultramodern::renderer::RendererContext> inner_context)
-        : inner(std::move(inner_context)) {
+    explicit PacingRendererContext(std::unique_ptr<ultramodern::renderer::RendererContext> inner_context, uint8_t *rdram)
+        : inner(std::move(inner_context)), game_rdram(rdram) {
         setup_result = inner->get_setup_result();
         chosen_api = inner->get_chosen_api();
     }
@@ -81,6 +83,7 @@ public:
 
     void send_dl(const OSTask* task) override {
         inner->send_dl(task);
+        yg_coop_capture_after_dl(game_rdram, static_cast<uint32_t>(task->t.data_ptr));
     }
 
     void send_dummy_workload(uint32_t fb_address) override {
@@ -105,12 +108,13 @@ public:
 
 private:
     std::unique_ptr<ultramodern::renderer::RendererContext> inner;
+    uint8_t *game_rdram;
 };
 
 std::unique_ptr<ultramodern::renderer::RendererContext> create_pacing_render_context(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
     auto presentation_mode = ultramodern::renderer::PresentationMode::PresentEarly;
     auto render_context = recompui::renderer::create_render_context(rdram, window_handle, presentation_mode, developer_mode);
-    return std::make_unique<PacingRendererContext>(std::move(render_context));
+    return std::make_unique<PacingRendererContext>(std::move(render_context), rdram);
 }
 }
 
@@ -142,7 +146,7 @@ ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
-    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC) > 0) {
         exit_error("Failed to initialize SDL2: %s\n", SDL_GetError());
@@ -227,7 +231,7 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
     flags |= SDL_WINDOW_VULKAN;
 #endif
 
-    window = SDL_CreateWindow("DK64: Recompiled", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,  flags);
+    window = SDL_CreateWindow("DK64 Recompiled Co-op", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,  flags);
 
     if (window == nullptr) {
         exit_error("Failed to create window: %s\n", SDL_GetError());
@@ -438,7 +442,7 @@ std::vector<recomp::GameEntry> supported_games = {
         .display_name = "Donkey Kong 64",
         .game_id = u8"DK64",
         .mod_game_id = "dk64",
-        .discovery_url = "https://dk64recomp.com/mods.json",
+        .discovery_url = "",
         // Eep16k instead of Eep4k to have room for extra save file data.
         .save_type = recomp::SaveType::Eep16k,
         .thumbnail_bytes = std::span<const char>(icon_bytes),
@@ -680,6 +684,7 @@ void on_launcher_init(recompui::LauncherMenu *menu) {
 #define REGISTER_FUNC(name) recomp::overlays::register_base_export(#name, name)
 
 int main(int argc, char** argv) {
+    if (!yg_use_app_data()) return EXIT_FAILURE;
     (void)argc;
     (void)argv;
     recomp::Version project_version{};
@@ -738,7 +743,8 @@ int main(int argc, char** argv) {
 
 #ifdef _WIN32
     // Force wasapi on Windows, as there seems to be some issue with sample queueing with directsound currently.
-    SDL_setenv("SDL_AUDIODRIVER", "wasapi", true);
+    // Respect a caller-selected driver, including the muted test driver's dummy.
+    if (!SDL_getenv("SDL_AUDIODRIVER")) SDL_setenv("SDL_AUDIODRIVER", "wasapi", true);
 #endif
 
 #if defined(__linux__) && defined(RECOMP_FLATPAK)
@@ -779,6 +785,23 @@ int main(int argc, char** argv) {
     // Register supported games and patches
     for (const auto& game : supported_games) {
         recomp::register_game(game);
+    }
+
+    // YouGame: `--rom <path>` is the player's own verified copy, handed over read-only by the desktop app (launch
+    // spec "disc"). The runtime's own selection checks it and stores it in this build's data folder, as its picker would.
+    {
+        const std::filesystem::path yg_rom = yg_rom_argument(argc, argv);
+        if (!yg_rom.empty()) {
+            recomp::check_all_stored_roms();
+            if (recomp::is_rom_valid(supported_games[0].game_id)) {
+                std::fprintf(stderr, "YG-COOP rom-argument stored-copy-valid\n");
+            } else {
+                const recomp::RomValidationError yg_result = recomp::select_rom(yg_rom, supported_games[0].game_id);
+                recomp::check_all_stored_roms();
+                std::fprintf(stderr, "YG-COOP rom-argument result=%d valid=%d\n", static_cast<int>(yg_result),
+                    recomp::is_rom_valid(supported_games[0].game_id) ? 1 : 0);
+            }
+        }
     }
 
     REGISTER_FUNC(recomp_get_window_resolution);

@@ -1,5 +1,6 @@
 #include "common_structs.h"
 #include "ui.h"
+#include "yg_coop.h"
 
 extern u32 D_global_asm_80744478;
 extern s32 D_global_asm_80747B24;
@@ -93,6 +94,7 @@ Gfx *rdpStoreFB(Gfx *dl, Actor *a) {
 extern void *D_global_asm_8076A060;
 extern Gfx *func_global_asm_8068C20C(Gfx *, u8);
 RECOMP_PATCH Gfx *func_global_asm_805FE398(Gfx *dl) {
+    dl = yg_coop_framebuffer_begin(dl);
     dl = func_global_asm_8068C20C(dl, 0); // @recomp: Run a special pre-world load framebuffer thing
     gDPPipeSync(dl++);
     gDPSetRenderMode(dl++, G_RM_NOOP, G_RM_NOOP2);
