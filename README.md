@@ -1,3 +1,8 @@
+> **This is YouGame's online co-op fork** of [Rainchus/Donkey-Kong-64-Recompiled](https://github.com/Rainchus/Donkey-Kong-64-Recompiled).
+> The recompilation is the upstream authors' work; this branch adds an experimental two-player co-op mode played through
+> [YouGame](https://yougame.co). What changed, how to build and the current state: [yougame/README.md](yougame/README.md).
+> You need your own copy of Donkey Kong 64 (USA); no game data is here or in the releases.
+
 # Donkey Kong 64: Recompiled
 Donkey Kong 64: Recompiled is a project that uses [N64: Recompiled](https://github.com/Mr-Wiseguy/N64Recomp) to **statically recompile** Donkey Kong 64 into a native port with many new features and enhancements. This project uses [RT64](https://github.com/rt64/rt64) as the rendering engine to provide some of these enhancements.
 
