@@ -50,6 +50,7 @@
 #include "librecomp/mods.hpp"
 #include "librecomp/helpers.hpp"
 #include "yg_coop_capture.h"
+#include "yg_coop_notice.hpp"
 #include "yougame_data.hpp"
 
 #include "../../patches/graphics.h"
@@ -842,6 +843,16 @@ int main(int argc, char** argv) {
 
     recompui::register_launcher_init_callback(on_launcher_init);
     recompui::register_launcher_update_callback(dk64::launcher_animation_update);
+    recompui::register_ui_update_callback([] {
+        // Draw thread only, after prompt initialization. Leave an existing
+        // prompt alone and retry later; neither the worker nor game waits on OK.
+        if (recompui::is_prompt_open()) return;
+        const auto message = yg_coop::take_online_notice();
+        if (!message.empty()) {
+            recompui::open_info_prompt("Online co-op is off", message, "OK", {},
+                                       recompui::ButtonStyle::Tertiary);
+        }
+    });
 
     recomp::rsp::callbacks_t rsp_callbacks{
         .get_rsp_microcode = get_rsp_microcode,

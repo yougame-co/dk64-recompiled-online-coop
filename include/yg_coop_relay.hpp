@@ -3,6 +3,7 @@
 
 #include "yg_coop_net.hpp"
 #include "yg_coop_smooth.hpp"
+#include "yg_coop_notice.hpp"
 #include "yougame_net.h"
 #include <atomic>
 #include <chrono>
@@ -146,6 +147,26 @@ inline std::string_view json_field(std::string_view object, std::string_view key
         if (name == key) return object.substr(start, end - start);
         if (i == object.size() || object[i++] != ',') return {};
     }
+}
+
+inline std::string ticket_error_message(std::string_view json) {
+    // Decode the whole bounded JSON string before truncating, so a long error
+    // still displays its first 200 printable characters instead of disappearing.
+    const auto field = json_field(json, "error");
+    std::string decoded(field.size() + 1, '\0');
+    const long length = ygnet_json_str(json.data(), json.size(), "error",
+                                     decoded.data(), decoded.size());
+    std::string message;
+    if (length > 0) {
+        for (long i = 0; i < length && message.size() < 200; ++i) {
+            const unsigned char c = static_cast<unsigned char>(decoded[size_t(i)]);
+            message += c >= 0x20 && c <= 0x7e ? char(c) : ' ';
+        }
+        const auto first = message.find_first_not_of(' ');
+        if (first == std::string::npos) message.clear();
+        else message = message.substr(first, message.find_last_not_of(' ') - first + 1);
+    }
+    return message.empty() ? "Online co-op could not start. Offline play still works." : message;
 }
 
 // The generic two-player room broadcasts the same ordered players array to
@@ -347,13 +368,15 @@ private:
         if (json_field(json, "ok") != "true" || n <= 0) {
             self.failed_ = true;
             self.mode_ = YG_NET_ERROR;
-            // Log only known codes, never an arbitrary app/server string.
+            // Log only known codes plus a sanitized app/server sentence.
             char code[33];
             const long length = ygnet_json_str(json.data(), json.size(), "code", code, sizeof(code));
             const char *safe = length > 0 &&
                 (!std::strcmp(code, "staging_access") || !std::strcmp(code, "ticket_failed") ||
-                 !std::strcmp(code, "unavailable")) ? code : "unknown";
-            std::fprintf(stderr, "YG-COOP error relay-ticket code=%s\n", safe);
+                 !std::strcmp(code, "unavailable") || !std::strcmp(code, "app_update_required")) ? code : "unknown";
+            const std::string message = ticket_error_message(json);
+            std::fprintf(stderr, "YG-COOP error relay-ticket code=%s message=%s\n", safe, message.c_str());
+            queue_online_notice(message);
             return;
         }
         self.ticket_.assign(ticket, size_t(n));

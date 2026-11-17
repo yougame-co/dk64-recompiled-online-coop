@@ -1,3 +1,15 @@
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -38,6 +38,9 @@
+     // If set, you will need to initialize the launcher's options, by calling
+     // `menu->init_game_options_menu`, and then adding options to it.
+     void register_launcher_init_callback(std::function<void(LauncherMenu *menu)> callback);
++    // Register before starting the runtime; called on the UI draw thread after
++    // initialization, including while the launcher/config contexts are hidden.
++    void register_ui_update_callback(std::function<void()> callback);
+ 
+     // Use this to update the launcher each frame.
+     void register_launcher_update_callback(std::function<void(LauncherMenu *menu)> callback);
 --- a/recompui/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
 +++ b/recompui/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
 @@ -94,14 +94,12 @@
@@ -17,6 +29,29 @@
  }
  
  bool RmlSDL::InputEventHandler(Rml::Context* context, SDL_Event& ev)
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -34,6 +34,11 @@
+ #include "util/file.h"
+ 
+ static std::atomic_bool cursor_enabled = true;
++static std::function<void()> ui_update_callback;
++
++void recompui::register_ui_update_callback(std::function<void()> callback) {
++    ui_update_callback = std::move(callback);
++}
+ 
+ void recompui::open_quit_game_prompt() {
+     recompui::open_choice_prompt(
+@@ -859,6 +864,8 @@
+     ui_state->update_primary_input(mouse_moved, non_mouse_interacted);
+     ui_state->update_focus(mouse_moved, non_mouse_interacted);
+ 
++    if (ui_update_callback) ui_update_callback();
++
+     if (recompui::is_any_context_shown()) {
+         if (recompui::is_context_shown(recompui::get_launcher_context_id())) {
+             recompui::update_launcher_menu();
 --- a/recompui/src/composites/ui_mod_discovery_http.cpp
 +++ b/recompui/src/composites/ui_mod_discovery_http.cpp
 @@ -94,116 +94,21 @@
@@ -25,10 +60,7 @@
      {
 -        CurlSession session;
 -        std::string response;
-+        throw std::runtime_error("YouGame restricted build: mod HTTP disabled");
-+    
-+}
- 
+-
 -        std::string busted_url = append_cache_busting_query(url);
 -
 -        curl_easy_setopt(session.handle, CURLOPT_URL, busted_url.c_str());
@@ -56,15 +88,15 @@
 -
 -        return response;
 -    }
--
-     std::vector<char> http_fetch_bytes(const std::string &url)
-     {
--        CurlSession session;
--        std::vector<char> response;
 +        throw std::runtime_error("YouGame restricted build: mod HTTP disabled");
 +    
 +}
  
+     std::vector<char> http_fetch_bytes(const std::string &url)
+     {
+-        CurlSession session;
+-        std::vector<char> response;
+-
 -        std::string busted_url = append_cache_busting_query(url);
 -
 -        curl_easy_setopt(session.handle, CURLOPT_URL, busted_url.c_str());
@@ -92,7 +124,10 @@
 -
 -        return response;
 -    }
--
++        throw std::runtime_error("YouGame restricted build: mod HTTP disabled");
++    
++}
+ 
      void http_download_to_file(const std::string &url,
                                 const std::string &output_path)
      {
@@ -101,10 +136,7 @@
 -        {
 -            throw std::runtime_error("Failed to open output file: " + output_path);
 -        }
-+        throw std::runtime_error("YouGame restricted build: mod HTTP disabled");
-+    
-+}
- 
+-
 -        try
 -        {
 -            CurlSession session;
@@ -143,7 +175,10 @@
 -
 -        fclose(file);
 -    }
--
++        throw std::runtime_error("YouGame restricted build: mod HTTP disabled");
++    
++}
+ 
  }
 --- a/recompui/src/config/ui_config_tab_general.cpp
 +++ b/recompui/src/config/ui_config_tab_general.cpp

@@ -14,10 +14,10 @@
 #define YG_COOP_ENABLED 1
 #endif
 #ifndef YG_COOP_AUTOPILOT
-#define YG_COOP_AUTOPILOT 1
+#define YG_COOP_AUTOPILOT 0
 #endif
 #ifndef YG_COOP_FRAME_DUMP
-#define YG_COOP_FRAME_DUMP 1
+#define YG_COOP_FRAME_DUMP 0
 #endif
 #ifndef YG_COOP_PUPPET_OFFSET
 #define YG_COOP_PUPPET_OFFSET 1
@@ -161,7 +161,8 @@ static u8 visible;
 static u8 failed;
 static u8 echo_kong;
 static u8 dump_index;
-static u8 autopilot_disabled;
+/* Release play starts in the same state as the test's real-input handoff. */
+static u8 autopilot_disabled = !YG_COOP_AUTOPILOT;
 static u8 net_role_seen;
 static u8 relay_lost_logged;
 static u8 autopilot_step;
@@ -693,6 +694,9 @@ void yg_coop_frame(void) {
     Actor *player;
     AnimationStateUnk0 *track;
     frame++;
+#if !YG_COOP_AUTOPILOT
+    if (frame == 1) recomp_printf("YG-COOP autopilot disabled-by-build\n");
+#endif
     net_mode = yg_coop_net_mode(); /* 4B: the room sets the role asynchronously; re-read every frame. */
     if (net_mode == YG_NET_ROLE_A || net_mode == YG_NET_ROLE_B) net_role_seen = 1;
     else if (net_mode == YG_NET_ERROR && net_role_seen) {
@@ -801,10 +805,11 @@ Gfx *yg_coop_draw_echo(s32 camera, Actor *actor, Gfx *dl, s32 pass) {
 }
 
 Gfx *yg_coop_framebuffer_begin(Gfx *dl) {
-#if YG_COOP_ENABLED && YG_COOP_FRAME_DUMP
-    static const u8 dump_seconds[] = { 5, 15, 25, 33 };
+#if YG_COOP_ENABLED
     /* Reset on every list, since the RT64 extended setting persists. */
     gEXSetRenderToRAM(dl++, 0);
+#if YG_COOP_FRAME_DUMP
+    static const u8 dump_seconds[] = { 5, 15, 25, 33 };
     if (walk_started && !autopilot_disabled && (net_mode || visible) && dump_index < 4 &&
         current_map == MAP_TRAINING_GROUNDS && !is_cutscene_active &&
         !(D_global_asm_8076A0B1 & 1) && !(global_properties_bitfield & 2) &&
@@ -821,6 +826,7 @@ Gfx *yg_coop_framebuffer_begin(Gfx *dl) {
                       seconds, frame, autopilot_step == YG_STAND ? "stand" : "walk");
         dump_index++;
     }
+#endif
 #endif
     return dl;
 }
