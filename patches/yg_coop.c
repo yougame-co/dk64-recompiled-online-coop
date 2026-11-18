@@ -22,6 +22,10 @@
 #ifndef YG_COOP_PUPPET_OFFSET
 #define YG_COOP_PUPPET_OFFSET 1
 #endif
+#ifndef YG_COOP_SPAWN_SETTLE_FRAMES
+/* frame counts 30 Hz game updates, independently of interpolated rendering. */
+#define YG_COOP_SPAWN_SETTLE_FRAMES 60
+#endif
 
 extern Actor *gPlayerPointer;
 extern Actor *gCurrentPlayer;
@@ -178,6 +182,11 @@ static s16 circle_heading;
 static u8 logged_animation_fallback;
 static u8 logged_idle_proxy;
 static u8 test_kong_done;
+static u32 spawn_settle_frame;
+static u32 spawn_hold_start;
+static u8 spawn_hold_active;
+static u8 spawn_blocked = 1;
+static s32 spawn_peer_map = -1;
 
 static tuple_f echo_position(void) {
     tuple_f position = delayed.position;
@@ -206,6 +215,56 @@ static void hide_echo(const char *reason) {
     visible = 0;
     samples = 0;
     write_index = 0;
+}
+
+/* Shared by update, model selection, pose and draw: a render callback can see
+ * a transition/cutscene before the next game update. Never touch map-owned
+ * puppet buffers here; hide_echo only clears visibility/history. */
+static int spawn_held(void) {
+    const char *reason = 0;
+    if (is_cutscene_active) reason = "cutscene";
+    else if ((D_global_asm_8076A0B1 & 1) ||
+             history_map != (s32)current_map) reason = "map-load";
+    else if (current_map == MAP_MAIN_MENU || gameIsInMainMenuMode() ||
+             (global_properties_bitfield & 2) || !valid_player())
+        reason = "menu";
+    if (reason) {
+        spawn_settle_frame = frame;
+        spawn_blocked = 1;
+    } else {
+        /* Start a full settle interval on the first safe frame, including
+         * the frame on which a cutscene ends or a player becomes valid. */
+        if (spawn_blocked) {
+            spawn_settle_frame = frame;
+            spawn_blocked = 0;
+        }
+        if ((u32)(frame - spawn_settle_frame) < YG_COOP_SPAWN_SETTLE_FRAMES)
+            reason = "settle";
+    }
+    if (reason) {
+        if (!spawn_hold_active) {
+            spawn_hold_active = 1;
+            spawn_hold_start = frame;
+            recomp_printf("YG-COOP spawn-hold start frame=%u map=%d reason=%s\n",
+                          frame, current_map, reason);
+            hide_echo(reason);
+        } else if (visible) hide_echo(reason);
+        return 1;
+    }
+    if (spawn_hold_active) {
+        recomp_printf("YG-COOP spawn-hold end frame=%u map=%d held-frames=%u\n",
+                      frame, current_map, (u32)(frame - spawn_hold_start));
+        spawn_hold_active = 0;
+    }
+    return 0;
+}
+
+static void spawn_peer_frame(void) {
+    s32 peer_map = (net_status & YG_NET_LIVE) ? (s32)delayed.map : -1;
+    if (spawn_peer_map != peer_map) {
+        spawn_peer_map = peer_map;
+        if (peer_map == (s32)current_map) spawn_settle_frame = frame;
+    }
 }
 
 static int test_kong_frame(void) {
@@ -413,6 +472,7 @@ static void autopilot_input(OSContPad *pads) {
 }
 
 static int create_echo(u8 player_kong) {
+    if (spawn_held()) return 0;
     u8 wanted = net_mode ? player_kong : player_kong == 1 ? 0 : 1;
     Actor *candidate;
     int loaded = 0;
@@ -448,6 +508,7 @@ static int create_echo(u8 player_kong) {
     for (u32 i = 0; i < entries_before && i < 32; i++)
         references_before[i] = D_global_asm_807FB630[i].references;
     attempted = 1;
+    recomp_printf("YG-COOP model-load-start frame=%u map=%d kong=%d\n", frame, current_map, wanted);
     if (!func_global_asm_806134B4(candidate, kong_models[wanted]) ||
         !candidate->unk0 || !candidate->animation_state || !candidate->animation_state->unk0)
         goto load_failed;
@@ -538,6 +599,8 @@ static void network_frame(void) {
     } else net_player = 0;
     net_local.spawn_epoch = net_spawn_epoch;
     net_status = yg_coop_net_step(&net_local, &delayed, frame, sizeof(net_local));
+    spawn_peer_frame();
+    if (spawn_held()) return;
     if (!local_valid || !(net_status & YG_NET_LIVE) || delayed.map != current_map) {
         hide_echo(!local_valid ? "player-unavailable" :
                   !(net_status & YG_NET_LIVE) ? "peer-unavailable" : "peer-map");
@@ -566,6 +629,7 @@ static void network_frame(void) {
 }
 
 static void pose_echo(void) {
+    if (spawn_held()) return;
     s16 animation;
     s32 logical = delayed.logical_animation;
     s32 mapped = 0;
@@ -669,6 +733,8 @@ RECOMP_PATCH void func_global_asm_8060AC34(OSContPad *pads) {
 void yg_coop_before_map_load(void) {
 #if YG_COOP_ENABLED
     hide_echo("map-load");
+    spawn_settle_frame = frame;
+    spawn_blocked = 1;
     /* The loader resets the entire map heap (patches_heap.c:80610350).
      * Do not free model/bone buffers ahead of the loader's synchronization:
      * the previously queued display list may still reference those buffers. */
@@ -693,6 +759,7 @@ void yg_coop_frame(void) {
     YGSample *sample;
     Actor *player;
     AnimationStateUnk0 *track;
+    int held;
     frame++;
 #if !YG_COOP_AUTOPILOT
     if (frame == 1) recomp_printf("YG-COOP autopilot disabled-by-build\n");
@@ -711,6 +778,8 @@ void yg_coop_frame(void) {
         /* Map-load entry point must have disposed the old model first. No
          * stale map allocation is ever dereferenced on a missed transition. */
         hide_echo("map-change");
+        spawn_settle_frame = frame;
+        spawn_blocked = 1;
         model_ready = 0;
         cached_models = 0;
         failed_models = 0;
@@ -721,6 +790,7 @@ void yg_coop_frame(void) {
         failed = 0;
         history_map = current_map;
     }
+    held = spawn_held();
     if (net_mode) {
         network_frame();
         return; /* Echo history, 90-frame lag and echo logs are untouched below. */
@@ -744,7 +814,7 @@ void yg_coop_frame(void) {
         if (samples == YG_HISTORY) {
             /* exactly 90 samples behind; explicit copy: a struct assignment this size compiles to a bare memcpy the recompiler cannot link */
             memcpy_recomp(&delayed, &history[write_index], sizeof(delayed));
-            if ((!model_ready || echo_kong == sample->kong) && !failed) {
+            if (!held && (!model_ready || echo_kong == sample->kong) && !failed) {
                 if (visible) {
                     recomp_printf("YG-COOP despawn frame=%u map=%d reason=kong-change\n", frame, history_map);
                     visible = 0;
@@ -752,7 +822,7 @@ void yg_coop_frame(void) {
                 model_ready = create_echo(sample->kong);
                 failed = !model_ready;
             }
-            if (model_ready && delayed.map == current_map) {
+            if (!held && model_ready && delayed.map == current_map) {
                 if (!visible) {
                     visible = 1;
                     recomp_printf("YG-COOP spawn frame=%u map=%d kong=%d lag=90 approach=private-model\n",
@@ -787,6 +857,7 @@ void yg_coop_frame(void) {
 
 Gfx *yg_coop_draw_echo(s32 camera, Actor *actor, Gfx *dl, s32 pass) {
 #if YG_COOP_ENABLED
+    if (spawn_held()) return dl;
     if (visible && model_ready && actor == gPlayerPointer && valid_player() &&
         history_map == (s32)current_map && !(D_global_asm_8076A0B1 & 1)) {
         pose_echo();
